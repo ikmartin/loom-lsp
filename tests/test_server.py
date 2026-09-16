@@ -16,6 +16,11 @@ from loom_lsp.server import (
     document_symbols,
     find_references,
     goto_definition,
+    incoming_calls,
+    inlay_hint,
+    outgoing_calls,
+    prepare_call_hierarchy,
+    workspace_symbol,
 )
 from loom_lsp.workspace import find_quilt
 
@@ -175,6 +180,108 @@ def test_code_actions_offer_the_missing_uses_as_an_edit_and_the_rest_as_commands
     assert accept.command is not None and accept.command.arguments[0][:2] == ["loom", "accept"]
     assert "--quilt" in accept.command.arguments[0]
     assert accept.command.arguments[1]  # a confirmation string, because this writes
+
+    # every action does something when chosen: an edit, or a command the editor carries out
+    assert all(a.edit is not None or a.command is not None for a in got)
+    assert {a.command.command for a in got if a.command} <= {"loom.run", "loom.open"}
+
+
+def _actions_at(harness, path: Path, needle: str) -> list[lsp.CodeAction]:  # type: ignore[no-untyped-def]
+    uri = harness.open(path)
+    pos = harness.position_of(path, needle)
+    return code_actions(
+        harness.server,
+        lsp.CodeActionParams(
+            text_document=lsp.TextDocumentIdentifier(uri=uri),
+            range=lsp.Range(pos, pos),
+            context=lsp.CodeActionContext(diagnostics=[]),
+        ),
+    )
+
+
+def test_open_in_arras_is_a_command_naming_the_statement_even_from_its_proof(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    node = quilt / "nodes" / "sy-000B.tex"
+    for needle in ("Every finite widget", "Combine Theorem"):
+        opened = [a for a in _actions_at(harness, node, needle) if a.title.startswith("Open ")]
+        assert len(opened) == 1, needle
+        assert opened[0].command is not None
+        assert opened[0].command.command == "loom.open"
+        assert opened[0].command.arguments == ["sy-000B"]
+        assert opened[0].data is None
+
+
+def test_workspace_symbols_find_a_node_by_title_at_its_label(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    harness.open(quilt / "drafts" / "main.tex")
+    got = workspace_symbol(harness.server, lsp.WorkspaceSymbolParams(query="widget"))
+    widget = next(s for s in got if s.name.startswith("sy-0001 "))
+    assert "Definition: Widget" in widget.name
+    assert isinstance(widget.location, lsp.Location)
+    text = (quilt / "drafts" / "main.tex").read_text(encoding="utf-8").splitlines()
+    line = widget.location.range.start.line
+    rng = widget.location.range
+    assert text[line][rng.start.character : rng.end.character] == "\\label{sy-0001}"
+
+    everything = workspace_symbol(harness.server, lsp.WorkspaceSymbolParams(query=""))
+    names = {s.name.split()[0] for s in everything}
+    assert {"sy-0001", "sy-0003", "sy-000B"} <= names
+
+
+def _prepare(harness, path: Path, needle: str, extra: int = 0) -> lsp.CallHierarchyItem:  # type: ignore[no-untyped-def]
+    uri = harness.open(path)
+    items = prepare_call_hierarchy(
+        harness.server,
+        lsp.CallHierarchyPrepareParams(
+            text_document=lsp.TextDocumentIdentifier(uri=uri), position=harness.position_of(path, needle, extra)
+        ),
+    )
+    assert len(items) == 1
+    return items[0]
+
+
+def test_dependencies_are_a_call_hierarchy_in_both_directions(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    main_thm = quilt / "nodes" / "sy-000B.tex"
+    item = _prepare(harness, main_thm, "Every finite widget")
+    assert item.name == "sy-000B"
+
+    out = outgoing_calls(harness.server, lsp.CallHierarchyOutgoingCallsParams(item=item))
+    targets = {c.to.name: c for c in out}
+    assert {"sy-0003", "sy-0006"} <= set(targets)
+    lines = main_thm.read_text(encoding="utf-8").splitlines()
+    sites = [lines[r.start.line][r.start.character : r.end.character] for r in targets["sy-0003"].from_ranges]
+    assert "\\ref{sy-0003}" in sites and "\\uses{sy-0003, sy-0006}" in sites
+
+    # from a reference, the hierarchy is prepared on the node it names
+    theorem = _prepare(harness, main_thm, "\\ref{sy-0003}", 6)
+    assert theorem.name == "sy-0003"
+    inc = incoming_calls(harness.server, lsp.CallHierarchyIncomingCallsParams(item=theorem))
+    assert "sy-000B" in {c.from_.name for c in inc}
+    assert all(c.from_.name != "sy-0003" for c in inc)
+
+
+def _hints(harness, path: Path) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]
+    uri = harness.open(path)
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    got = inlay_hint(
+        harness.server,
+        lsp.InlayHintParams(
+            text_document=lsp.TextDocumentIdentifier(uri=uri),
+            range=lsp.Range(lsp.Position(0, 0), lsp.Position(len(lines), 0)),
+        ),
+    )
+    return [(lines[h.position.line][: h.position.character], str(h.label)) for h in got]
+
+
+def test_inlay_hints_name_what_references_and_inclusions_point_to(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    hints = _hints(harness, quilt / "nodes" / "sy-000B.tex")
+    before_ref = [label for before, label in hints if before.endswith("\\ref{sy-0003}")]
+    assert len(before_ref) == 1 and before_ref[0].startswith("Theorem")
+    uses = [label for before, label in hints if before.endswith("\\uses{sy-0003, sy-0006}")]
+    assert len(uses) == 1 and "; " in uses[0]  # one hint for a command naming two keys
+
+    main = _hints(harness, quilt / "drafts" / "main.tex")
+    assert any(before.endswith("\\input{nodes/sy-0002}") for before, _ in main)
+    assert not any(before.endswith("\\input{nodes/missing}") for before, _ in main)
 
 
 def test_closing_a_buffer_drops_its_overlay(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]

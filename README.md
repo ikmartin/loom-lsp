@@ -10,7 +10,10 @@ A language server for [loom](https://github.com/ikmartin/loom) quilts. It speaks
 - **Hover**: taxon, title, number in the default master, state and why it is stale, open comment counts, and the first lines of the statement.
 - **Document symbols**: the file's nodes as a tree, sections containing environments containing proofs.
 - **Completion**: ids and aliases with their titles, citekeys from the bibliography, taxa from the preamble closure, `% !LOOM` directive keys, and digest node ids after `\cite[`.
-- **Code actions**, each of which shells out to `loom` and confirms first, since these write: add a missing `\uses` entry, insert a node skeleton, atomize the node under the cursor, accept the key under the cursor, open the node in arras.
+- **Workspace symbols**: every key `loom search` finds for the query, named with its taxon and title, so a node can be found by title, alias, tag or id.
+- **Call hierarchy** over dependencies: outgoing calls are what a node uses (its statement's and proofs' edges), incoming calls are what uses it, each with the reference sites.
+- **Inlay hints**: the taxon, number and title of what each `\ref`, `\uses`, `\input` or `\nest` points to, shown after the command.
+- **Code actions**: add a missing `\uses` entry as an edit; accept the key under the cursor, atomize the file and insert a node skeleton as a `loom.run` command (argument vector, confirmation text); open the node in arras as a `loom.open` command (the statement's key). The editor carries out both commands, confirming first for the ones that write; the server registers no commands of its own, and it knows no server URL, because the editor owns the `loom serve` it opens.
 
 ## Installing
 

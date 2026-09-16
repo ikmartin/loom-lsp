@@ -20,6 +20,7 @@ from loom_lsp.actions import actions_at, uses_edit
 from loom_lsp.analysis import definition, node_at, references, token_at
 from loom_lsp.encoding import Mapper
 from loom_lsp.info import Symbol, completions, hover, symbols
+from loom_lsp.navigation import Call, Place, incoming, inlay_hints, outgoing, place, workspace_symbols
 from loom_lsp.workspace import Workspace, find_quilt, path_of, uri_of
 
 DEBOUNCE_SECONDS = 0.25
@@ -55,7 +56,6 @@ class LoomLanguageServer(LanguageServer):
         self.mappers: dict[str, Mapper] = {}
         self.encoding = "utf-16"
         self.loom_bin = "loom"
-        self.serve_url = "http://127.0.0.1:8000"
         self._timer: threading.Timer | None = None
         self._pending: set[Path] = set()
 
@@ -168,7 +168,6 @@ def initialize(ls: LoomLanguageServer, params: lsp.InitializeParams) -> None:
     options = params.initialization_options or {}
     if isinstance(options, dict):
         ls.loom_bin = str(options.get("loomPath") or ls.loom_bin)
-        ls.serve_url = str(options.get("serveUrl") or ls.serve_url)
 
 
 @server.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
@@ -331,7 +330,7 @@ def code_actions(ls: LoomLanguageServer, params: lsp.CodeActionParams) -> list[l
     key = node_at(result, rel, offset)
     line = params.range.start.line + 1
     out: list[lsp.CodeAction] = []
-    for a in actions_at(result, ws.snapshot.diagnostics, rel, line, key, loom_bin=ls.loom_bin, serve_url=ls.serve_url):
+    for a in actions_at(result, ws.snapshot.diagnostics, rel, line, key, loom_bin=ls.loom_bin):
         edit = None
         if a.command == "uses" and a.data.get("key") and a.data.get("label"):
             made = uses_edit(result, a.data["key"], a.data["label"])
@@ -349,15 +348,146 @@ def code_actions(ls: LoomLanguageServer, params: lsp.CodeActionParams) -> list[l
                         ]
                     }
                 )
+        command = None
+        if a.command == "open":
+            command = lsp.Command(title=a.title, command="loom.open", arguments=[a.data["key"]])
+        elif edit is None and a.argv:
+            command = lsp.Command(title=a.title, command="loom.run", arguments=[a.argv, a.confirm])
+        if edit is None and command is None:
+            continue  # an action that neither edits nor runs would do nothing when chosen
+        out.append(lsp.CodeAction(title=a.title, kind=lsp.CodeActionKind(a.kind), edit=edit, command=command))
+    return out
+
+
+# ---- navigation --------------------------------------------------------------
+#
+# The editor carries out `loom.run` and `loom.open` itself (chapter 16): the server registers no commands, because a command the server advertises is routed back to the server by vscode-languageclient and collides with the editor's.
+
+PLACE_KIND = {
+    "section": lsp.SymbolKind.Namespace,
+    "environment": lsp.SymbolKind.Class,
+    "proof": lsp.SymbolKind.Method,
+    "digest": lsp.SymbolKind.Package,
+    "master": lsp.SymbolKind.File,
+}
+
+
+def _range(ws: Workspace, ls: LoomLanguageServer, file: str, start: int, end: int) -> lsp.Range:
+    m = Mapper(ws.text_of(file), encoding=ls.encoding)
+    s_line, s_char = m.position(start)
+    e_line, e_char = m.position(end)
+    return lsp.Range(lsp.Position(s_line, s_char), lsp.Position(e_line, e_char))
+
+
+@server.feature(lsp.WORKSPACE_SYMBOL)
+def workspace_symbol(ls: LoomLanguageServer, params: lsp.WorkspaceSymbolParams) -> list[lsp.WorkspaceSymbol]:
+    """Every key `loom search` finds for the query, across every quilt the server has scanned."""
+    out: list[lsp.WorkspaceSymbol] = []
+    for ws in ls.workspaces.values():
+        if ws.snapshot is None:
+            continue
+        for p in workspace_symbols(ws.snapshot.result, params.query):
+            out.append(
+                lsp.WorkspaceSymbol(
+                    name=p.name,
+                    kind=PLACE_KIND.get(p.kind, lsp.SymbolKind.Object),
+                    container_name=p.container or None,
+                    location=lsp.Location(
+                        uri=uri_of(ws.root / p.file), range=_range(ws, ls, p.file, p.label_start, p.label_end)
+                    ),
+                )
+            )
+    return out
+
+
+def _item(ws: Workspace, ls: LoomLanguageServer, p: Place) -> lsp.CallHierarchyItem:
+    return lsp.CallHierarchyItem(
+        name=p.key,
+        detail=p.detail,
+        kind=PLACE_KIND.get(p.kind, lsp.SymbolKind.Object),
+        uri=uri_of(ws.root / p.file),
+        range=_range(ws, ls, p.file, p.start, p.end),
+        selection_range=_range(ws, ls, p.file, p.label_start, p.label_end),
+        data={"key": p.key},
+    )
+
+
+@server.feature(lsp.TEXT_DOCUMENT_PREPARE_CALL_HIERARCHY)
+def prepare_call_hierarchy(
+    ls: LoomLanguageServer, params: lsp.CallHierarchyPrepareParams
+) -> list[lsp.CallHierarchyItem]:
+    """The node a reference under the cursor names, or else the node the cursor is in."""
+    ctx = _context(ls, params.text_document.uri)
+    if ctx is None:
+        return []
+    ws, result, rel, mapper = ctx
+    offset = mapper.offset(params.position.line, params.position.character)
+    token = token_at(mapper.text, offset)
+    key = result.assembly.labels.get(token.value) if token is not None and token.kind in ("ref", "see") else None
+    key = key or node_at(result, rel, offset)
+    p = place(result, key) if key else None
+    return [_item(ws, ls, p)] if p is not None else []
+
+
+def _item_context(ls: LoomLanguageServer, item: lsp.CallHierarchyItem) -> tuple[Workspace, ScanResult, str] | None:
+    ws = ls.workspace_for(item.uri)
+    key = item.data.get("key") if isinstance(item.data, dict) else None
+    if ws is None or ws.snapshot is None or not key:
+        return None
+    return ws, ws.snapshot.result, str(key)
+
+
+def _calls(
+    ws: Workspace, ls: LoomLanguageServer, calls: list[Call]
+) -> list[tuple[lsp.CallHierarchyItem, list[lsp.Range]]]:
+    return [(_item(ws, ls, c.place), [_range(ws, ls, c.file, a, b) for a, b in c.sites]) for c in calls]
+
+
+@server.feature(lsp.CALL_HIERARCHY_OUTGOING_CALLS)
+def outgoing_calls(
+    ls: LoomLanguageServer, params: lsp.CallHierarchyOutgoingCallsParams
+) -> list[lsp.CallHierarchyOutgoingCall]:
+    """What the node depends on, from its statement's and its proofs' edges."""
+    ctx = _item_context(ls, params.item)
+    if ctx is None:
+        return []
+    ws, result, key = ctx
+    return [
+        lsp.CallHierarchyOutgoingCall(to=item, from_ranges=ranges)
+        for item, ranges in _calls(ws, ls, outgoing(result, key))
+    ]
+
+
+@server.feature(lsp.CALL_HIERARCHY_INCOMING_CALLS)
+def incoming_calls(
+    ls: LoomLanguageServer, params: lsp.CallHierarchyIncomingCallsParams
+) -> list[lsp.CallHierarchyIncomingCall]:
+    """What depends on the node, from the edges that reach it or its proofs."""
+    ctx = _item_context(ls, params.item)
+    if ctx is None:
+        return []
+    ws, result, key = ctx
+    return [
+        lsp.CallHierarchyIncomingCall(from_=item, from_ranges=ranges)
+        for item, ranges in _calls(ws, ls, incoming(result, key))
+    ]
+
+
+@server.feature(lsp.TEXT_DOCUMENT_INLAY_HINT)
+def inlay_hint(ls: LoomLanguageServer, params: lsp.InlayHintParams) -> list[lsp.InlayHint]:
+    """The taxon, number and title of what each reference and inclusion in the range points to."""
+    ctx = _context(ls, params.text_document.uri)
+    if ctx is None:
+        return []
+    _ws, result, rel, mapper = ctx
+    start = mapper.offset(params.range.start.line, params.range.start.character)
+    end = mapper.offset(params.range.end.line, params.range.end.character)
+    out: list[lsp.InlayHint] = []
+    for h in inlay_hints(result, rel, start, end):
+        line, char = mapper.position(h.offset)
         out.append(
-            lsp.CodeAction(
-                title=a.title,
-                kind=lsp.CodeActionKind(a.kind.replace("quickfix", "quickfix")),
-                edit=edit,
-                command=None
-                if edit is not None or not a.argv
-                else lsp.Command(title=a.title, command="loom.run", arguments=[a.argv, a.confirm]),
-                data={"url": a.data["url"]} if a.data.get("url") else None,
+            lsp.InlayHint(
+                position=lsp.Position(line, char), label=h.label, kind=lsp.InlayHintKind.Type, padding_left=True
             )
         )
     return out

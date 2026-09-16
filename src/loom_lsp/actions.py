@@ -33,7 +33,6 @@ def actions_at(
     key: str | None,
     *,
     loom_bin: str = "loom",
-    serve_url: str = "http://127.0.0.1:8000",
 ) -> list[Action]:
     """Every action offered at a position: the fixes for the diagnostics on this line, then the things one can do to the node under the cursor."""
     root = str(result.quilt.root)
@@ -81,10 +80,10 @@ def actions_at(
             Action(
                 title=f"Open {statement} in arras",
                 command="open",
-                argv=[],
+                argv=[],  # the editor opens it on the server it owns, so no url is known here
                 confirm="",
                 kind="source",
-                data={"url": f"{serve_url.rstrip('/')}/node/{statement}"},
+                data={"key": statement},
             )
         )
     out.append(

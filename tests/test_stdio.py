@@ -84,6 +84,8 @@ def test_the_binary_answers_over_stdio(tmp_path: Path) -> None:
                 got_initialize = True
                 caps = msg["result"]["capabilities"]
                 assert "hoverProvider" in caps and "definitionProvider" in caps
+                assert {"workspaceSymbolProvider", "callHierarchyProvider", "inlayHintProvider"} <= set(caps)
+                assert not caps.get("executeCommandProvider", {}).get("commands")
             if msg.get("method") == "textDocument/publishDiagnostics":
                 got_diagnostics = True
                 break
