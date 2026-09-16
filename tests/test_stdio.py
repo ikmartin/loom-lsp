@@ -92,3 +92,13 @@ def test_the_binary_answers_over_stdio(tmp_path: Path) -> None:
     finally:
         proc.kill()
         proc.wait(timeout=10)
+
+
+def test_the_transport_flag_clients_append_is_accepted() -> None:
+    """`vscode-languageclient` invokes a stdio server as `loom-lsp --stdio`. Rejecting the flag exits 2 before a byte is written, and the editor reports only "server process exited with code 2"."""
+    exe = shutil.which("loom-lsp")
+    cmd = [exe, "--stdio", "--version"] if exe else [sys.executable, "-m", "loom_lsp.cli", "--stdio", "--version"]
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+    done = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
+    assert done.returncode == 0, done.stderr
+    assert "loom-lsp" in done.stdout
