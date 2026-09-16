@@ -1,0 +1,43 @@
+[project]
+name = "loom-lsp"
+version = "0.1.0.dev0"
+description = "A language server for loom quilts: navigation, diagnostics, completion, and code actions over the loom source contract."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Isaac Martin" }]
+dependencies = ["loomtex", "pygls>=1.3"]
+
+[project.scripts]
+loom-lsp = "loom_lsp.cli:main"
+
+# Development resolves loomtex from the sibling checkout; the published package depends on it from the index like any other.
+[tool.uv.sources]
+loomtex = { path = "../loom", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "mypy>=1.11", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_lsp"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["E501"]  # prose is never hard-wrapped (workspace CLAUDE.md); ruff format governs code width
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
