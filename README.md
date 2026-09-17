@@ -13,6 +13,7 @@ A language server for [loom](https://github.com/ikmartin/loom) quilts. It speaks
 - **Workspace symbols**: every key `loom search` finds for the query, named with its taxon and title, so a node can be found by title, alias, tag or id.
 - **Call hierarchy** over dependencies: outgoing calls are what a node uses (its statement's and proofs' edges), incoming calls are what uses it, each with the reference sites.
 - **Inlay hints**: the taxon, number and title of what each `\ref`, `\uses`, `\input` or `\nest` points to, shown after the command.
+- **Reshaping the node under the cursor**, both as workspace edits the editor applies, since loom never edits source: *atomize* moves the node (with the proof it carries) into `nodes/<id>.tex` and leaves an `\input` line behind, in one undoable step; *give this node an id* inserts `\label{<next free id>}`, and is what is offered when a node has no id.
 - **Code actions**: add a missing `\uses` entry as an edit; accept the key under the cursor, atomize the file and insert a node skeleton as a `loom.run` command (argument vector, confirmation text); open the node in arras as a `loom.open` command (the statement's key). The editor carries out both commands, confirming first for the ones that write; the server registers no commands of its own, and it knows no server URL, because the editor owns the `loom serve` it opens.
 
 ## Installing

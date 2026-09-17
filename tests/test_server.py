@@ -210,6 +210,89 @@ def test_open_in_arras_is_a_command_naming_the_statement_even_from_its_proof(qui
         assert opened[0].data is None
 
 
+def _reshape_actions_at(harness, path: Path, needle: str, kind: str):  # type: ignore[no-untyped-def]
+    return [a for a in _actions_at(harness, path, needle) if a.kind == kind]
+
+
+def test_atomizing_the_node_under_the_cursor_is_one_edit_that_creates_its_file(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    main = quilt / "drafts" / "main.tex"
+    (action,) = _reshape_actions_at(harness, main, "\\begin{definition}[Widget]", lsp.CodeActionKind.RefactorExtract)
+    assert action.title == "Atomize sy-0001 into nodes/sy-0001.tex"
+    create, write, replace = action.edit.document_changes
+    assert isinstance(create, lsp.CreateFile) and create.uri.endswith("/nodes/sy-0001.tex")
+    assert write.text_document.uri == create.uri
+    assert write.edits[0].new_text.startswith("\\begin{definition}[Widget]\\label{sy-0001}")
+    assert write.edits[0].new_text.endswith("\n")
+
+    text = main.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    rng = replace.edits[0].range
+    start = sum(len(x) for x in lines[: rng.start.line]) + rng.start.character
+    end = sum(len(x) for x in lines[: rng.end.line]) + rng.end.character
+    assert replace.text_document.uri.endswith("/drafts/main.tex")
+    assert replace.edits[0].new_text == "\\input{nodes/sy-0001}"
+    assert text[start:end] == write.edits[0].new_text.rstrip("\n"), "the region that moves is what the file receives"
+    assert text[:start] + "\\input{nodes/sy-0001}" + text[end:] != text
+
+
+def test_a_node_already_in_its_own_file_or_a_section_is_not_offered(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    assert (
+        _reshape_actions_at(
+            harness, quilt / "nodes" / "sy-0003.tex", "\\begin{theorem}", lsp.CodeActionKind.RefactorExtract
+        )
+        == []
+    )
+    assert (
+        _reshape_actions_at(
+            harness, quilt / "drafts" / "main.tex", "\\section{Introduction}", lsp.CodeActionKind.RefactorExtract
+        )
+        == []
+    )
+
+
+def test_a_node_with_no_id_is_offered_one_instead_of_an_atomize(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    main = quilt / "drafts" / "main.tex"
+    text = main.read_text(encoding="utf-8")
+    edited = text.replace("\\end{document}", "\\begin{lemma}\nNo id yet.\n\\end{lemma}\n\\end{document}")
+    harness.open(main)
+    harness.change(main, edited)
+    uri = harness.uri(main)
+    line = edited[: edited.index("No id yet.")].count("\n") - 1
+    got = code_actions(
+        harness.server,
+        lsp.CodeActionParams(
+            text_document=lsp.TextDocumentIdentifier(uri=uri),
+            range=lsp.Range(lsp.Position(line, 0), lsp.Position(line, 1)),
+            context=lsp.CodeActionContext(diagnostics=[]),
+        ),
+    )
+    assert [a.title for a in got if a.kind == lsp.CodeActionKind.RefactorExtract] == []
+    (label,) = [a for a in got if a.kind == lsp.CodeActionKind.RefactorRewrite]
+    assert label.title.startswith("Give this node the id sy-")
+    (edit,) = next(iter(label.edit.changes.values()))
+    assert edit.new_text.startswith("\\label{sy-") and edit.new_text.endswith("}")
+    assert edited.splitlines()[edit.range.start.line].startswith("\\begin{lemma}")
+
+
+def test_the_plan_reads_the_unsaved_buffer(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    main = quilt / "drafts" / "main.tex"
+    harness.open(main)
+    edited = main.read_text(encoding="utf-8").replace("A \\emph{widget} is", "A \\emph{gadget} is")
+    uri = harness.change(main, edited)
+    line = edited[: edited.index("\\begin{definition}[Widget]")].count("\n")
+    got = code_actions(
+        harness.server,
+        lsp.CodeActionParams(
+            text_document=lsp.TextDocumentIdentifier(uri=uri),
+            range=lsp.Range(lsp.Position(line, 0), lsp.Position(line, 1)),
+            context=lsp.CodeActionContext(diagnostics=[]),
+        ),
+    )
+    (action,) = [a for a in got if a.kind == lsp.CodeActionKind.RefactorExtract]
+    _create, write, _replace = action.edit.document_changes
+    assert "gadget" in write.edits[0].new_text, "the node file takes the buffer's text, not the disk's"
+
+
 def test_workspace_symbols_find_a_node_by_title_at_its_label(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
     harness.open(quilt / "drafts" / "main.tex")
     got = workspace_symbol(harness.server, lsp.WorkspaceSymbolParams(query="widget"))

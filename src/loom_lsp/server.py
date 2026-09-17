@@ -21,6 +21,7 @@ from loom_lsp.analysis import definition, node_at, references, token_at
 from loom_lsp.encoding import Mapper
 from loom_lsp.info import Symbol, completions, hover, symbols
 from loom_lsp.navigation import Call, Place, incoming, inlay_hints, outgoing, place, workspace_symbols
+from loom_lsp.reshape import label_for, move_for
 from loom_lsp.workspace import Workspace, find_quilt, path_of, uri_of
 
 DEBOUNCE_SECONDS = 0.25
@@ -56,6 +57,7 @@ class LoomLanguageServer(LanguageServer):
         self.mappers: dict[str, Mapper] = {}
         self.encoding = "utf-16"
         self.loom_bin = "loom"
+        self.creates_files = True  # the client can carry a CreateFile in a workspace edit
         self._timer: threading.Timer | None = None
         self._pending: set[Path] = set()
 
@@ -168,6 +170,9 @@ def initialize(ls: LoomLanguageServer, params: lsp.InitializeParams) -> None:
     options = params.initialization_options or {}
     if isinstance(options, dict):
         ls.loom_bin = str(options.get("loomPath") or ls.loom_bin)
+    edits = getattr(getattr(params.capabilities, "workspace", None), "workspace_edit", None)
+    operations = list(getattr(edits, "resource_operations", None) or []) if edits else []
+    ls.creates_files = "create" in operations or not operations
 
 
 @server.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
@@ -356,7 +361,76 @@ def code_actions(ls: LoomLanguageServer, params: lsp.CodeActionParams) -> list[l
         if edit is None and command is None:
             continue  # an action that neither edits nor runs would do nothing when chosen
         out.append(lsp.CodeAction(title=a.title, kind=lsp.CodeActionKind(a.kind), edit=edit, command=command))
+    out.extend(_reshape_actions(ls, ws, result, rel, key))
     return out
+
+
+def _reshape_actions(
+    ls: LoomLanguageServer, ws: Workspace, result: ScanResult, rel: str, key: str | None
+) -> list[lsp.CodeAction]:
+    """Move the node under the cursor into `nodes/<id>.tex`, or give it an id when that is what stands in the way.
+
+    Both are workspace edits: loom plans them and the editor applies them, so the author's file is changed by the author's editor and one undo puts it back.
+    """
+    if key is None:
+        return []
+    move, refusal = move_for(result, rel, key)
+    if move is not None and ls.creates_files:
+        m = Mapper(ws.text_of(move.file), encoding=ls.encoding)
+        s_line, s_char = m.position(move.start)
+        e_line, e_char = m.position(move.end)
+        return [
+            lsp.CodeAction(
+                title=f"Atomize {move.key} into {move.target}",
+                kind=lsp.CodeActionKind.RefactorExtract,
+                edit=lsp.WorkspaceEdit(
+                    document_changes=[
+                        lsp.CreateFile(uri=uri_of(ws.root / move.target)),
+                        lsp.TextDocumentEdit(
+                            text_document=lsp.OptionalVersionedTextDocumentIdentifier(
+                                uri=uri_of(ws.root / move.target)
+                            ),
+                            edits=[
+                                lsp.TextEdit(
+                                    range=lsp.Range(lsp.Position(0, 0), lsp.Position(0, 0)), new_text=move.text
+                                )
+                            ],
+                        ),
+                        lsp.TextDocumentEdit(
+                            text_document=lsp.OptionalVersionedTextDocumentIdentifier(uri=uri_of(ws.root / move.file)),
+                            edits=[
+                                lsp.TextEdit(
+                                    range=lsp.Range(lsp.Position(s_line, s_char), lsp.Position(e_line, e_char)),
+                                    new_text=move.replacement,
+                                )
+                            ],
+                        ),
+                    ]
+                ),
+            )
+        ]
+    if move is None and refusal and "loom:atomize-unlabelled" in refusal:
+        label = label_for(result, rel, key)
+        if label is not None:
+            m = Mapper(ws.text_of(label.file), encoding=ls.encoding)
+            line, char = m.position(label.offset)
+            return [
+                lsp.CodeAction(
+                    title=f"Give this node the id {label.node_id}",
+                    kind=lsp.CodeActionKind.RefactorRewrite,
+                    edit=lsp.WorkspaceEdit(
+                        changes={
+                            uri_of(ws.root / label.file): [
+                                lsp.TextEdit(
+                                    range=lsp.Range(lsp.Position(line, char), lsp.Position(line, char)),
+                                    new_text=label.text,
+                                )
+                            ]
+                        }
+                    ),
+                )
+            ]
+    return []
 
 
 # ---- navigation --------------------------------------------------------------
