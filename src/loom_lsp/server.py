@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 from loom.records.store import Records
@@ -362,7 +363,19 @@ def code_actions(ls: LoomLanguageServer, params: lsp.CodeActionParams) -> list[l
             continue  # an action that neither edits nor runs would do nothing when chosen
         out.append(lsp.CodeAction(title=a.title, kind=lsp.CodeActionKind(a.kind), edit=edit, command=command))
     out.extend(_reshape_actions(ls, ws, result, rel, key))
-    return out
+    return _only(out, params.context.only)
+
+
+def _kind(kind: lsp.CodeActionKind | str | None) -> str:
+    return str(getattr(kind, "value", kind) or "")
+
+
+def _only(actions: list[lsp.CodeAction], wanted: Sequence[lsp.CodeActionKind | str] | None) -> list[lsp.CodeAction]:
+    """The actions a client asked for: a requested kind matches itself and everything under it (`refactor` covers `refactor.extract`)."""
+    kinds = [_kind(k) for k in wanted or []]
+    if not kinds:
+        return actions
+    return [a for a in actions if any(_kind(a.kind) == k or _kind(a.kind).startswith(k + ".") for k in kinds)]
 
 
 def _reshape_actions(

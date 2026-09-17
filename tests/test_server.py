@@ -235,6 +235,32 @@ def test_atomizing_the_node_under_the_cursor_is_one_edit_that_creates_its_file(q
     assert text[:start] + "\\input{nodes/sy-0001}" + text[end:] != text
 
 
+def test_the_client_gets_only_the_kinds_it_asked_for(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
+    main = quilt / "drafts" / "main.tex"
+    uri = harness.open(main)
+    pos = harness.position_of(main, "\\begin{definition}[Widget]")
+
+    def ask(only: list[str] | None) -> list[str]:
+        got = code_actions(
+            harness.server,
+            lsp.CodeActionParams(
+                text_document=lsp.TextDocumentIdentifier(uri=uri),
+                range=lsp.Range(pos, pos),
+                context=lsp.CodeActionContext(
+                    diagnostics=[], only=[lsp.CodeActionKind(k) for k in only] if only else None
+                ),
+            ),
+        )
+        return [str(a.kind.value) for a in got]
+
+    everything = ask(None)
+    assert len(everything) > 1 and "refactor.extract" in everything
+    assert ask(["refactor.extract"]) == ["refactor.extract"]
+    assert set(ask(["source"])) == {"source"}
+    assert ask(["quickfix"]) == []
+    assert "refactor.extract" in ask(["refactor"]), "a kind covers everything under it"
+
+
 def test_a_node_already_in_its_own_file_or_a_section_is_not_offered(quilt: Path, harness) -> None:  # type: ignore[no-untyped-def]
     assert (
         _reshape_actions_at(
